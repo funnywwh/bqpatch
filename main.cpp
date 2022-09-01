@@ -15,7 +15,7 @@ struct MapData{
 };
 MapData map(const char* fname){
     MapData data = {0};
-    FILE* f = fopen(fname,"rb");
+    FILE* f = fopen(fname,"ab+");
     if(!f){
         return data;
     }
@@ -33,6 +33,7 @@ MapData map(const char* fname){
 struct PatchRecord{
     /**
      * @brief 
+     * ‘s’ 文件大小
      * '+' 添加
      * '-' 删除
      * ‘c’ 复制
@@ -47,13 +48,17 @@ void unmap(MapData& data){
     fclose(data.file);
 }
 int diff(const char* oldfile,const char* newfile,const char* patchfile){
-    MapData oldData,newData,patchData;
+    MapData oldData,newData;
     oldData = map(oldfile);
     newData = map(newfile);
     size_t oldpos = 0;
     size_t newpos = 0;
     std::vector<PatchRecord> records;
  
+    PatchRecord sizeRecord= {0};
+    sizeRecord.action = 's';
+    sizeRecord.len = newData.len;
+    records.push_back(sizeRecord);
     do{
         bool end_file = false;
         while(!end_file){
@@ -174,6 +179,54 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
     return 0;
 }
 int patch(const char* oldfile,const char* newfile,const char* patchfile){
+    MapData oldData,newData,patchData;
+    oldData = map(oldfile);
+    patchData = map(patchfile);
+    size_t patchpos = 0;
+    PatchRecord* pCur = (PatchRecord*)patchData.data;
+    size_t newSize = 0;
+    FILE* newf = fopen(newfile,"wb+");
+    if(!newf){
+        return -1;
+    }
+    do{
+        if(pCur){
+            if(pCur->action == 's'){
+                newSize = pCur->len;
+            }
+            patchpos += sizeof(PatchRecord);
+            while(patchpos < patchData.len){
+                PatchRecord* pCur = (PatchRecord*)&patchData.data[patchpos];
+                switch (pCur->action)
+                {
+                case '+':
+                    {
+                        patchpos += sizeof(PatchRecord);
+                        fwrite(&patchData.data[patchpos],pCur->len,1,newf);
+                        patchpos += pCur->len;
+                    }
+                    break;
+                case '-':
+                    {
+                        patchpos += sizeof(PatchRecord);
+                    }
+                    break;
+                case 'c':
+                    {
+                        patchpos += sizeof(PatchRecord);
+                        fwrite(&oldData.data[pCur->pos],pCur->len,1,newf);
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+
+    }while(0);
+    fclose(newf);
+    unmap(oldData);
+    unmap(patchData);
     return 0;
 }
 int main(int argc,char* argv[]){
@@ -184,7 +237,6 @@ int main(int argc,char* argv[]){
     char* oldfile = argv[2];
     char* newfile = argv[3];
     char* patchfile = argv[4];
-    printf("oldfile:%s,newfile:%s,patchfile:%s\n",oldfile,newfile,patchfile);
     if(strcmp(argv[1],"-d") == 0){
         return diff(oldfile,newfile,patchfile);
     }else if(strcmp(argv[1],"-p") == 0){
