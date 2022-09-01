@@ -15,7 +15,7 @@ struct MapData{
 };
 MapData map(const char* fname){
     MapData data = {0};
-    FILE* f = fopen(fname,"ab+");
+    FILE* f = fopen(fname,"rb");
     if(!f){
         return data;
     }
@@ -60,7 +60,7 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
     sizeRecord.len = newData.len;
     records.push_back(sizeRecord);
     do{
-        bool end_file = false;
+        bool end_file = oldpos >= oldData.len || newpos >= newData.len;
         while(!end_file){
             if(oldData.data[oldpos] != newData.data[newpos]){
                 if(newpos <= oldpos){
@@ -168,7 +168,7 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
                 patch_size += record.len;
                 fwrite(data,record.len,1,fpatch);
             }else if(record.action == '-'){
-                patch_size -= record.len;
+                
             }
         }
         printf("patch size:%llu\n",patch_size);
@@ -182,12 +182,18 @@ int patch(const char* oldfile,const char* newfile,const char* patchfile){
     MapData oldData,newData,patchData;
     oldData = map(oldfile);
     patchData = map(patchfile);
+    if(patchData.data == nullptr){
+        if(oldData.data != nullptr){
+            unmap(oldData);
+        }
+        return -1;
+    }
     size_t patchpos = 0;
     PatchRecord* pCur = (PatchRecord*)patchData.data;
     size_t newSize = 0;
     FILE* newf = fopen(newfile,"wb+");
     if(!newf){
-        return -1;
+        return -2;
     }
     do{
         if(pCur){
