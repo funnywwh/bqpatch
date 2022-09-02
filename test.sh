@@ -13,4 +13,4 @@ else
     echo FAILED
 fi
 
-rm a b b1
+rm a b b1 c
