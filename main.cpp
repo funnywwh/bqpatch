@@ -172,6 +172,16 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
     MapData oldData,newData;
     oldData = map(oldfile);
     newData = map(newfile);
+
+    if(oldData.data == nullptr || newData.data == nullptr){
+        if(oldData.data != nullptr){
+            unmap(oldData);
+        }
+        if(newData.data != nullptr){
+            unmap(newData);
+        }
+        return -1;
+    }
     size_t oldpos = 0;
     size_t newpos = 0;
     std::vector<PatchRecord> records;
@@ -275,7 +285,7 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
         for(auto record : records){
             int ret = write_patch_record(record,fpatch);
             if(ret < 0 ){
-                ret = -1;
+                ret = -2;
                 break;
             }
         }
