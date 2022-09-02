@@ -4,9 +4,24 @@
 #include <vector>
 #include <string.h>
 
+#if DEBUG
+#define LOG(fmt,argv...) printf(fmt,##argv);
+#define LOGBIN(data,len) \
+{ \
+    printf("0x"); \
+    for(int i = 0;i<len;i++){ \
+        printf("%02x",data[i]); \
+    } \
+    printf("\n"); \
+}\
+
+#else
+#define LOG(fmt,argv...)
+#define LOGBIN(data,len)
+#endif //DDBUG
 void usage(){
-    printf("bqpath -d oldfile newfile patchfile\n");
-    printf("bqpath -p oldfile newfile patchfile\n");
+    printf("bqpath diff oldfile newfile patchfile\n");
+    printf("bqpath patch oldfile newfile patchfile\n");
 }
 struct MapData{
     unsigned char* data;
@@ -30,16 +45,22 @@ MapData map(const char* fname){
     }while(0);
     return data;
 }
+
+enum ACTION{
+    ACTION_SIZE = 0x1,
+    ACTION_ADD  = 0x2,
+    ACTION_DEL  = 0x3,
+    ACTION_COPY = 0x4,
+};
 struct PatchRecord{
     /**
      * @brief 
-     * ‘s’ 文件大小
-     * '+' 添加
-     * '-' 删除
+     * ACTION_SIZE 文件大小
+     * ACTION_ADD 添加
+     * ACTION_DEL 删除
      * ‘c’ 复制
      */
-    char action;
-    size_t pos;
+    unsigned char action;
     size_t len;
     unsigned char* data;
 };
@@ -47,6 +68,106 @@ void unmap(MapData& data){
     munmap(data.data,data.len);
     fclose(data.file);
 }
+
+/**
+ * @brief 
+ * (MSB)<lensize>(4bit)<action>(4bit)+[len](lensize_byte)+[data](len)
+ * @param record 
+ * @param fout 
+ * @return int 
+ */
+int write_patch_record(PatchRecord& record,FILE* fout){
+    unsigned char action = record.action;
+    unsigned lensize = 0;
+    int len = record.len;
+    char out[5] = {0};
+    out[0] = action;
+
+    //little endian
+    for(int i = 0;i<4 && len >0;i++){
+        out[i+1] = len & 0xff;
+        len >>= 8;
+        lensize ++;
+    }
+    out[0] |= lensize << 4;
+    int ret = fwrite(out,1+lensize,1,fout);
+    if(ret <= 0){
+        return -1;
+    }
+    switch (record.action)
+    {
+    case ACTION_ADD:
+        {
+            ret = fwrite(record.data,record.len,1,fout);
+            LOG("+,%llu\n",record.len);
+            LOGBIN(record.data,record.len);
+        }
+        break;
+    case ACTION_COPY:
+        {
+            LOG("c,%llu\n",record.len);
+            LOGBIN(record.data,record.len);
+        };
+        break;
+    case ACTION_DEL:
+        {
+            LOG("-,%llu\n",record.len);
+        }
+        break;
+    case ACTION_SIZE:
+        {
+            LOG("new file size:%llu\n",record.len);
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+int read_patch_record(MapData& patchData,size_t& patchpos,MapData& oldData,size_t& oldpos,PatchRecord& out){
+    unsigned char action = patchData.data[patchpos++];
+    out.action = action & 0xf;
+    out.len = 0;
+    int lensize = (action >> 4) & 0xf;
+    //little endia
+    for(int i = 0;i<lensize;i++){
+        out.len |= (patchData.data[patchpos++])<<(i*8);
+    }
+    switch (out.action)
+    {
+    case ACTION_ADD:
+        {
+            out.data = &patchData.data[patchpos];
+            patchpos += out.len;
+            LOG("+,%llu\n",out.len);
+            LOGBIN(out.data,out.len);
+        }
+        break;
+    case ACTION_COPY:
+        {
+            out.data = &oldData.data[oldpos];
+            oldpos += out.len;
+            LOG("c,%llu\n",out.len);
+            LOGBIN(out.data,out.len);
+        }break;
+    case ACTION_SIZE:
+        {
+            LOG("new file size:%llu\n",out.len);
+        }
+        break;
+    case ACTION_DEL:
+        {
+            oldpos += out.len;
+            LOG("-,%llu\n",out.len);
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
 int diff(const char* oldfile,const char* newfile,const char* patchfile){
     MapData oldData,newData;
     oldData = map(oldfile);
@@ -56,7 +177,7 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
     std::vector<PatchRecord> records;
  
     PatchRecord sizeRecord= {0};
-    sizeRecord.action = 's';
+    sizeRecord.action = ACTION_SIZE;
     sizeRecord.len = newData.len;
     records.push_back(sizeRecord);
     do{
@@ -67,9 +188,7 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
                     //增加部分
                     size_t len = 1;
                     size_t new_pre_pos = newpos;
-                    size_t insertpos = oldpos;
                     do{
-                        oldpos ++;
                         newpos ++;
                         if(oldpos >= oldData.len || newpos >= newData.len){
                             end_file = true;
@@ -81,19 +200,16 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
                         len ++;
                     }while(true);
                     PatchRecord record;
-                    record.action = '+';
+                    record.action = ACTION_ADD;
                     record.len = len;
                     record.data = &newData.data[new_pre_pos];
-                    record.pos = insertpos;
                     records.push_back(record);
                 }else{
                     //减少部分
                     size_t len = 1;
-                    size_t delpos = oldpos;
                     size_t new_pre_pos = newpos;
                     do{
                         oldpos ++;
-                        newpos ++;
                         if(oldpos >= oldData.len || newpos >= newData.len){
                             end_file = true;
                             break;
@@ -104,9 +220,8 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
                         len ++;
                     }while(true);
                     PatchRecord record;
-                    record.action = '-';
+                    record.action = ACTION_DEL;
                     record.len = len;
-                    record.pos = delpos;
                     records.push_back(record);
                 }
             }else{
@@ -126,9 +241,9 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
                     len ++;
                 }while(true);
                 PatchRecord record;
-                record.action = 'c';
+                record.action = ACTION_COPY;
                 record.len = len;
-                record.pos = copypos;
+                record.data = &oldData.data[copypos];
                 records.push_back(record);
             }
             end_file = oldpos >= oldData.len || newpos >= newData.len;
@@ -137,18 +252,16 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
         if(oldpos >= oldData.len){
             if(newpos < newData.len){
                 PatchRecord record;
-                record.action = '+';
+                record.action = ACTION_ADD;
                 record.len = newData.len - newpos;
                 record.data = &newData.data[newpos];
-                record.pos = newpos;
                 records.push_back(record);
             }
         }else{
             if(oldpos < oldData.len){
                 PatchRecord record;
-                record.action = '-';
+                record.action = ACTION_DEL;
                 record.len = oldData.len - oldpos;
-                record.pos = oldpos;
                 records.push_back(record);
             }
         }
@@ -156,27 +269,21 @@ int diff(const char* oldfile,const char* newfile,const char* patchfile){
     }while(0);
     FILE* fpatch = fopen(patchfile,"wb+");
     
+    int ret = 0;
     if(fpatch){
         size_t patch_size = 0;
         for(auto record : records){
-            unsigned char* data = record.data;
-            record.data = nullptr;
-            fwrite(&record,sizeof(record),1,fpatch);
-            if(record.action == 'c'){
-                patch_size += record.len;
-            }else if(record.action == '+'){
-                patch_size += record.len;
-                fwrite(data,record.len,1,fpatch);
-            }else if(record.action == '-'){
-                
+            int ret = write_patch_record(record,fpatch);
+            if(ret < 0 ){
+                ret = -1;
+                break;
             }
         }
-        printf("patch size:%llu\n",patch_size);
         fclose(fpatch);
     }
     unmap(oldData);
     unmap(newData);
-    return 0;
+    return ret;
 }
 int patch(const char* oldfile,const char* newfile,const char* patchfile){
     MapData oldData,newData,patchData;
@@ -189,46 +296,35 @@ int patch(const char* oldfile,const char* newfile,const char* patchfile){
         return -1;
     }
     size_t patchpos = 0;
-    PatchRecord* pCur = (PatchRecord*)patchData.data;
-    size_t newSize = 0;
+    size_t oldpos = 0;
+    PatchRecord record;
     FILE* newf = fopen(newfile,"wb+");
     if(!newf){
         return -2;
     }
     do{
-        if(pCur){
-            if(pCur->action == 's'){
-                newSize = pCur->len;
-            }
-            patchpos += sizeof(PatchRecord);
-            while(patchpos < patchData.len){
-                PatchRecord* pCur = (PatchRecord*)&patchData.data[patchpos];
-                switch (pCur->action)
+        while(patchpos < patchData.len){
+            int ret = read_patch_record(patchData,patchpos,oldData,oldpos,record);
+            switch (record.action)
+            {
+            case ACTION_ADD:
                 {
-                case '+':
-                    {
-                        patchpos += sizeof(PatchRecord);
-                        fwrite(&patchData.data[patchpos],pCur->len,1,newf);
-                        patchpos += pCur->len;
-                    }
-                    break;
-                case '-':
-                    {
-                        patchpos += sizeof(PatchRecord);
-                    }
-                    break;
-                case 'c':
-                    {
-                        patchpos += sizeof(PatchRecord);
-                        fwrite(&oldData.data[pCur->pos],pCur->len,1,newf);
-                    }
-                    break;
-                default:
-                    break;
+                    fwrite(record.data,record.len,1,newf);
                 }
+                break;
+            case ACTION_DEL:
+                {
+                }
+                break;
+            case ACTION_COPY:
+                {
+                    fwrite(record.data,record.len,1,newf);
+                }
+                break;
+            default:
+                break;
             }
         }
-
     }while(0);
     fclose(newf);
     unmap(oldData);
@@ -243,10 +339,11 @@ int main(int argc,char* argv[]){
     char* oldfile = argv[2];
     char* newfile = argv[3];
     char* patchfile = argv[4];
-    if(strcmp(argv[1],"-d") == 0){
+    if(strcmp(argv[1],"diff") == 0){
         return diff(oldfile,newfile,patchfile);
-    }else if(strcmp(argv[1],"-p") == 0){
+    }else if(strcmp(argv[1],"patch") == 0){
         return patch(oldfile,newfile,patchfile);
     }
+    usage();
     return -1;
 }
